@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
 오꿈이 트위터 콘텐츠 자동 생성기
-매 30분마다 한국 트위터/인터넷 트렌드를 반영한 오꿈이 스타일 트윗 10개를 Discord로 전송
+API 없이 템플릿 + 트렌드 키워드 조합으로 오꿈이 스타일 트윗 생성
+매 30분마다 Discord 웹훅으로 10개 전송
 """
 
-import os
-import json
 import random
 import requests
-import anthropic
 import datetime
 from bs4 import BeautifulSoup
 
@@ -17,207 +15,220 @@ DISCORD_WEBHOOK_URL = (
     "QEfp8_ssBU4MJfQa-SWTV-ko9AtdPk3Psjpmn5Jz_FXhIz7cdb2Nopg5O5phoHQ1A6RQ"
 )
 
-# ─── 시간대별 트렌드 키워드 풀 ───────────────────────────────────────────────
+# ─── 트렌드 키워드 풀 (시간대별) ───────────────────────────────────────────
 TREND_POOL = {
-    "아침": ["기상", "출근", "아침밥", "커피", "지각", "알람", "모닝루틴", "버스", "지하철", "졸음"],
-    "점심": ["점심메뉴", "배달", "편의점", "구내식당", "회식", "다이어트", "치킨", "라면", "밥값", "카페"],
-    "오후": ["업무", "졸음", "집중", "카페인", "야근예감", "퇴근",  "퇴근길", "스트레스", "미팅", "디저트"],
-    "저녁": ["퇴근", "저녁", "야식", "넷플릭스", "피곤", "맥주", "치킨", "배달", "힐링", "집순이"],
-    "밤": ["새벽감성", "불면증", "생각많음", "유튜브", "밤샘", "내일걱정", "폰중독", "감성", "외로움", "먹방"],
+    "아침": ["아침밥", "출근길", "지각", "알람", "커피 한 잔", "버스", "지하철", "모닝루틴", "졸음"],
+    "점심": ["점심메뉴", "배달", "편의점 도시락", "구내식당", "다이어트", "치킨", "라면", "밥값 인상"],
+    "오후": ["오후 3시", "업무 집중", "카페인 한계", "야근 예감", "퇴근까지 N시간", "스트레스"],
+    "저녁": ["퇴근길", "야식", "넷플릭스", "오늘 수고했어", "치맥", "배달앱", "침대"],
+    "밤":   ["새벽 감성", "불면증", "생각 많음", "내일 걱정", "유튜브 알고리즘", "폰 중독", "먹방"],
     "공통": [
-        "월요일", "화요일", "수요일", "목요일", "금요일", "주말", "연휴",
-        "취준", "알바", "대학생", "직장인", "주부", "사회초년생",
-        "멘탈", "번아웃", "힐링", "자존감", "감정", "행복",
-        "MBTI", "인싸", "아싸", "덕질", "최애", "팬심",
-        "날씨", "비", "더위", "추위", "미세먼지",
-        "운동", "다이어트", "헬스", "러닝",
-        "연애", "썸", "이별", "짝사랑", "솔로",
-        "돈없음", "적금", "저축", "재테크", "용돈",
+        "월요일", "금요일", "주말", "연휴 전날", "취준", "알바", "대학생", "직장인",
+        "멘탈 관리", "번아웃", "자존감", "행복", "MBTI", "덕질", "최애",
+        "날씨", "비 오는 날", "운동", "다이어트 실패", "연애", "솔로", "통장 잔고",
+        "카페", "공부", "시험", "발표", "회의", "마감", "점심값",
     ],
 }
 
-OKUMI_PERSONA = """
-너는 멘탈케어 앱 '오리의 꿈(Duck's Dream)'의 마스코트 오꿈이야.
-귀엽고 통통한 오리 캐릭터인데, 트위터에서는 불닭볶음면·올리브영·투썸플레이스 공식 계정처럼
-웃기고 공감되는 글을 쓰는 계정이야.
+# ─── 오꿈이 트윗 템플릿 ────────────────────────────────────────────────────
+# {K} = 트렌드 키워드, {K2} = 두 번째 키워드
+# {EMO} = 감정 표현, {QUACK} = 오리 마무리
 
-■ 오꿈이 트위터 문체:
-- 짧고 임팩트 있음 (140자 이내)
-- 일상 공감 포인트를 오리/꿈/멘탈 드립으로 연결
-- 심리학·멘탈케어 내용을 진지하지 않게 유머로 풀기
-- 트렌드 키워드 자연스럽게 녹이기
-- 🦆 꽥 같은 오리 마무리 종종 사용
-- ㅋㅋㅋ ;;; ㅇㅈ? ㄹㅇ 같은 트위터 언어 사용
-- 가끔 진지한 척하다 반전 드립
-- 브랜드인데 친구 같은 느낌
+QUACKS = ["꽥", "꽥꽥", "🦆", "꽥..", "꽥?", "🦆💨", "꽥 (이건 공감 아님)", "꽥입니다"]
 
-■ 절대 하지 말 것:
-- "오리의 꿈 앱 다운로드" 같은 직접 광고
-- 지나치게 진지하거나 교훈적
-- 너무 길게 쓰기
-- 억지 해시태그 남발
+EMOTIONS = [
+    "멘탈이 나갔어", "진짜 공감됨", "이거 실화?", "왜 이렇게 공감돼",
+    "오늘도 수고했어", "괜찮아 다 그래", "이게 삶이지", "숨 한 번 쉬자",
+    "존버하는 중", "버티는 중", "힐링이 필요해", "감정 과부하",
+]
 
-■ 좋은 예시 스타일:
-"직장인 번아웃 3단계: 1. 오늘만 참자 2. 이번 주만 3. 이번 달만... 오꿈이는 4단계부터 봄 꽥"
-"치킨 먹으면서 다이어트 걱정하는 거 진짜 멘탈 스포츠인데 ㅋㅋ 오꿈이도 매일 하는 경기임"
-"월요일 아침 알람 끄고 5분만... 이 거짓말 몇 번째야 ㅇㅈ?"
-"""
+TEMPLATES = [
+    # 공감형
+    "{K} 앞에서 멘탈 터지는 사람 🦆",
+    "{K} 걱정하느라 잠 못 잔 사람 손 🦆",
+    "{K} 때문에 오늘 하루 다 썼다 꽥",
+    "{K} 보면서 '나만 힘든 게 아니구나' 하는 오꿈이 🦆",
+    "{K} 앞에선 다들 오리처럼 겉은 태연한데 발은 미친듯이 움직이는 중 ㅋㅋ",
+    "{K} 스트레스는 꿈에서 풀기로 함 꽥",
+    "{K} 버티는 거 그것 자체가 이미 대단한 거야 ㅇㅈ?",
+    "{K} 힘든 사람 오꿈이가 꽥 하고 있을게 🦆",
+
+    # 유머/반전형
+    "{K} 걱정 3초 → 포기 → 내일의 나에게 패스 → 오늘 하루 완료 꽥",
+    "{K} 때문에 멘탈 나간 사람: 저요\n{K} 극복한 사람: 아직 없음\n오꿈이: 둘 다 꽥",
+    "심리학적으로 {K} 앞에서 멍때리는 건 뇌가 스스로를 보호하는 거래. (방금 지어냄) 꽥",
+    "{K} 걱정하다가 딴 생각하다가 다시 {K} 걱정하다가 잠드는 루틴 ㅋㅋ",
+    "오늘의 목표: {K} 그냥 잊기. 달성률: 0% 꽥",
+    "{K} 해결법 3가지: 1. 잠자기 2. 밥 먹기 3. 또 잠자기 🦆",
+    "{K}? 꿈에서 해결해 꽥 (실제로 이 방법 효과 없음)",
+    "나는 {K}을 두 번 이겼다\n첫 번째: 꿈속에서\n두 번째: 아직 안 이김 꽥",
+
+    # 브랜드/오리 캐릭터형
+    "오꿈이가 {K} 잘 버티라고 꽥 하러 왔어 🦆",
+    "오리는 물 위에서 항상 여유로워 보이잖아. {K} 앞의 우리가 딱 그 꼴임 ㅋㅋ 꽥",
+    "오꿈이 오늘의 위로: {K} 힘들어도 넌 잘하고 있어. (진심임) 🦆",
+    "{K} 때문에 힘들면 오꿈이한테 꽥 하면 돼. 들을게 🦆",
+    "오리의 꿈이 뭔지 알아? {K} 없는 하루. 근데 꿈이라 아직 못 이뤄씀 꽥",
+
+    # 시간대 공감형
+    "오늘 {K} 어떻게 버텼어? 잘했다 진짜 꽥 🦆",
+    "{K} 끝나고 집 가는 길이 제일 좋은 순간 아님? 꽥",
+    "{K} 앞에서 버티는 거 보면 인간이 진짜 대단한 동물임. 오리는 그냥 꽥만 함",
+    "오늘 {K} 때문에 힘들었지? 자기 전에 잘 자라고 꽥 해줌 🦆",
+    "{K} 내일 생각하기로 하고 일단 지금 이 순간만 꽥 🦆",
+
+    # MZ/트위터 감성형
+    "{K} ㄹㅇ 공감되면 좋아요 한 번만 꽥",
+    "{K} 앞에서 ㅇㅈㄹ 하는 사람 vs 그냥 꽥 하는 사람 나는 후자",
+    "{K} 겪고 있는 사람 여기 있어? 오꿈이도 있어 꽥",
+    "{K} 힘들다고 티 내도 되는데 다들 왜 괜찮은 척 하는지 ;;; 꽥",
+    "솔직히 {K} 앞에서 '나 괜찮아'는 99% 거짓말임 ㅋㅋ 꽥",
+
+    # 두 키워드 조합형
+    "{K} 하면서 {K2} 걱정하는 멀티태스킹 고수들 🦆",
+    "{K} 때문에 힘들다가 {K2} 보고 현실 직면하는 순서 ㅋㅋ 꽥",
+    "{K}도 버텼는데 {K2}도 버텨. 오꿈이 믿어 꽥 🦆",
+    "오늘의 난이도: {K} ★★★☆☆ / {K2} ★★★★★ 꽥",
+
+    # 철학 드립형
+    "꿈에서는 {K} 없어. 그래서 꿈이 꿈인 거지 꽥",
+    "{K} 앞에서 멍때리는 시간도 필요해. 뇌가 쉬는 거거든. (오꿈이 심리학) 🦆",
+    "오리는 {K} 신경 안 써. 왜냐면 꽥만 하면 되거든. 인간이 더 복잡함 꽥",
+    "{K} 걱정하다 보면 어느새 해결돼 있는 경우가... 없지는 않음. 있을 수도 있음. 꽥",
+    "멘탈이 중요한 이유: {K} 앞에서 무너지면 아무것도 못 하거든. 오꿈이가 챙겨줄게 🦆",
+
+    # 요일/날씨/시즌 반응형
+    "이 {K} 분위기에 오꿈이가 안 올 수 없잖아 꽥 🦆",
+    "{K}인데 다들 어떻게 버티고 있어? 꽥하고 물어보러 왔어",
+    "{K} + 오꿈이 = 오늘 버티는 조합 🦆",
+
+    # 자존감/힐링형
+    "{K} 힘들어도 오늘 살아있는 것만으로 성공한 거야 꽥",
+    "{K} 앞에서 작아지지 마. 오꿈이가 크게 꽥 해줄게 🦆",
+    "세상이 {K}으로 힘들어도 꿈 꿀 수 있는 밤은 남아있어 꽥 🦆",
+    "{K} 때문에 지친 사람들 다 잘하고 있는 거야. 오꿈이가 봤음 꽥",
+]
 
 
 def get_time_slot() -> str:
-    """현재 시간대 반환"""
-    hour = datetime.datetime.now().hour
-    if 6 <= hour < 10:
-        return "아침"
-    elif 10 <= hour < 14:
-        return "점심"
-    elif 14 <= hour < 18:
-        return "오후"
-    elif 18 <= hour < 22:
-        return "저녁"
-    else:
-        return "밤"
+    kst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    h = kst.hour
+    if 6 <= h < 10:   return "아침"
+    if 10 <= h < 14:  return "점심"
+    if 14 <= h < 18:  return "오후"
+    if 18 <= h < 22:  return "저녁"
+    return "밤"
 
 
-def get_smart_trends() -> list[str]:
-    """시간대 + 무작위 조합으로 트렌드 키워드 선택"""
-    slot = get_time_slot()
-    slot_keywords = TREND_POOL.get(slot, [])
-    common_keywords = TREND_POOL["공통"]
-
-    # 시간대 키워드 3~4개 + 공통 키워드 6~7개
-    selected = random.sample(slot_keywords, min(4, len(slot_keywords)))
-    selected += random.sample(common_keywords, min(6, len(common_keywords)))
-    random.shuffle(selected)
-
-    print(f"[트렌드] 시간대: {slot} | 키워드: {selected[:10]}")
-    return selected[:10]
-
-
-def try_scrape_trends() -> list[str]:
-    """실시간 트렌드 스크래핑 시도 (실패 시 스마트 풀로 fallback)"""
-    # 네이버 실시간 검색어 스크래핑 시도
+def get_trends() -> list[str]:
+    """실시간 트렌드 스크래핑 → 실패 시 키워드 풀 사용"""
+    # signal.bz 실시간 키워드 시도
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-        # 네이버 데이터랩 JSON API
         res = requests.get(
             "https://signal.bz/news",
-            headers=headers,
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=8,
         )
         if res.status_code == 200:
             soup = BeautifulSoup(res.content, "html.parser")
-            items = soup.select(".trend_name")
-            trends = [item.get_text(strip=True) for item in items if item.get_text(strip=True)]
-            if trends:
-                print(f"[트렌드] 실시간 스크래핑 성공: {trends[:10]}")
-                return trends[:10]
+            items = [el.get_text(strip=True) for el in soup.select(".trend_name")]
+            if items:
+                print(f"[트렌드] 실시간: {items[:10]}")
+                return items[:10]
     except Exception as e:
         print(f"[트렌드 스크래핑 실패] {e}")
 
-    return get_smart_trends()
+    # fallback: 시간대 + 공통 키워드 풀
+    slot = get_time_slot()
+    pool = TREND_POOL.get(slot, []) + TREND_POOL["공통"]
+    selected = random.sample(pool, min(10, len(pool)))
+    print(f"[트렌드] 키워드 풀 사용 ({slot}): {selected}")
+    return selected
+
+
+def fill_template(template: str, keywords: list[str]) -> str:
+    """템플릿에 키워드 채워 넣기"""
+    kws = keywords[:]
+    random.shuffle(kws)
+    k1 = kws[0] if kws else "오늘"
+    k2 = kws[1] if len(kws) > 1 else "내일"
+    quack = random.choice(QUACKS)
+    result = (template
+              .replace("{K}", k1)
+              .replace("{K2}", k2)
+              .replace("{QUACK}", quack)
+              .replace("{EMO}", random.choice(EMOTIONS)))
+    return result
 
 
 def generate_tweets(trends: list[str]) -> list[str]:
-    """Claude API로 오꿈이 스타일 트윗 10개 생성"""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "ANTHROPIC_API_KEY 환경 변수가 설정되지 않았습니다.\n"
-            "터미널에서 실행: export ANTHROPIC_API_KEY=sk-ant-..."
-        )
+    """템플릿 + 키워드로 트윗 10개 생성"""
+    # 트렌드 키워드를 조금씩 변형해서 자연스럽게 만들기
+    cleaned = [k.lstrip("#") for k in trends]
 
-    client = anthropic.Anthropic(api_key=api_key)
+    # 템플릿 10개 무작위 선택 (중복 없이)
+    chosen_templates = random.sample(TEMPLATES, min(10, len(TEMPLATES)))
 
-    now = datetime.datetime.now()
-    time_slot = get_time_slot()
-    trend_str = ", ".join(trends)
+    tweets = []
+    for tmpl in chosen_templates:
+        tweet = fill_template(tmpl, cleaned)
+        tweets.append(tweet)
 
-    prompt = f"""{OKUMI_PERSONA}
-
-지금 시각: {now.strftime("%Y년 %m월 %d일 %H:%M")} ({time_slot}대)
-오늘의 트렌드/관심 키워드: {trend_str}
-
-위 트렌드 키워드 중 일부를 자연스럽게 녹여서 오꿈이 스타일 트윗 10개를 써줘.
-모든 키워드를 다 쓸 필요 없고, 자연스럽게 어울리는 것만 골라서 써.
-시간대({time_slot}대)에 어울리는 내용이면 더 좋아.
-
-규칙:
-- 각 트윗은 개행으로만 구분
-- 번호, 불릿, 접두어 없이 트윗 텍스트만 반환
-- 10개 정확히
-- 설명·메타 텍스트 없이 트윗만"""
-
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw = message.content[0].text.strip()
-    tweets = [line.strip() for line in raw.split("\n") if line.strip()]
-    return tweets[:10]
+    return tweets
 
 
 def send_to_discord(tweets: list[str], trends: list[str]):
-    """Discord 웹훅으로 트윗 초안 전송"""
-    now = datetime.datetime.now().strftime("%Y.%m.%d %H:%M")
+    """Discord 웹훅 전송"""
+    kst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    now_str = kst.strftime("%Y.%m.%d %H:%M KST")
     trend_preview = " · ".join(trends[:6])
 
     lines = [
-        f"🦆 **오꿈이 트윗 초안** `{now}`",
+        f"🦆 **오꿈이 트윗 초안** `{now_str}`",
         f"📈 키워드: `{trend_preview}`",
         "─────────────────────────────────",
         "",
     ]
-    for i, tweet in enumerate(tweets, 1):
-        lines.append(f"**{i}.** {tweet}")
+    for i, t in enumerate(tweets, 1):
+        lines.append(f"**{i}.** {t}")
+    lines += ["", "─────────────────────────────────", "_마음에 드는 글 골라서 트위터에 올려주세요 ✏️_"]
 
-    lines += ["", "─────────────────────────────────", "_마음에 드는 글을 골라 트위터에 올려주세요 ✏️_"]
+    full_msg = "\n".join(lines)
 
-    full_message = "\n".join(lines)
-
-    # Discord 2000자 제한 처리
-    chunks = []
-    current = ""
-    for line in full_message.split("\n"):
-        candidate = current + line + "\n"
-        if len(candidate) > 1900:
-            chunks.append(current.rstrip())
-            current = line + "\n"
+    # 2000자 청크 분할
+    chunks, cur = [], ""
+    for line in full_msg.split("\n"):
+        if len(cur) + len(line) + 1 > 1900:
+            chunks.append(cur.rstrip())
+            cur = line + "\n"
         else:
-            current = candidate
-    if current.strip():
-        chunks.append(current.rstrip())
+            cur += line + "\n"
+    if cur.strip():
+        chunks.append(cur.rstrip())
 
-    success = True
     for chunk in chunks:
-        res = requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=10)
-        if res.status_code not in (200, 204):
-            print(f"[Discord 실패] {res.status_code}: {res.text}")
-            success = False
+        r = requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=10)
+        if r.status_code in (200, 204):
+            print(f"[Discord OK] {len(chunk)}자 전송")
         else:
-            print(f"[Discord 전송 OK] {len(chunk)}자")
-
-    return success
+            print(f"[Discord 실패] {r.status_code}: {r.text}")
 
 
 def main():
+    kst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     print(f"\n{'='*50}")
-    print(f"오꿈이 트윗 생성 시작: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"오꿈이 트윗 생성: {kst.strftime('%Y-%m-%d %H:%M KST')}")
     print(f"{'='*50}")
 
-    trends = try_scrape_trends()
-
-    print("[생성] Claude로 오꿈이 스타일 트윗 생성 중...")
+    trends = get_trends()
     tweets = generate_tweets(trends)
-    print(f"[생성 완료] {len(tweets)}개 트윗")
+
+    print(f"\n[생성된 트윗 {len(tweets)}개]")
     for i, t in enumerate(tweets, 1):
         print(f"  {i}. {t}")
 
-    print("\n[전송] Discord 웹훅으로 전송 중...")
     send_to_discord(tweets, trends)
-    print(f"\n완료! 다음 실행: 30분 후\n")
+    print("\n완료!\n")
 
 
 if __name__ == "__main__":
