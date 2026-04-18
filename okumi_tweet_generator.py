@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 오꿈이 트위터 콘텐츠 자동 생성기
-API 없이 커뮤/트위터 말투 템플릿 + 트렌드 키워드 조합
-매 30분마다 Discord 웹훅으로 10개 전송
+Gemini (무료) + 실시간 트렌드로 오꿈이 스타일 트윗 10개 생성 → Discord 전송
 """
 
+import os
 import random
 import requests
 import datetime
+from google import genai
 from bs4 import BeautifulSoup
 
 DISCORD_WEBHOOK_URL = (
@@ -15,151 +16,145 @@ DISCORD_WEBHOOK_URL = (
     "QEfp8_ssBU4MJfQa-SWTV-ko9AtdPk3Psjpmn5Jz_FXhIz7cdb2Nopg5O5phoHQ1A6RQ"
 )
 
-TREND_POOL = {
-    "아침": ["알람", "지각", "출근", "아침밥", "커피", "버스", "지하철", "졸음", "모닝루틴"],
-    "점심": ["점심메뉴", "배달", "편의점", "구내식당", "다이어트", "치킨", "라면", "밥값"],
-    "오후": ["오후3시", "카페인", "야근", "퇴근", "집중력", "회의", "마감"],
-    "저녁": ["퇴근", "야식", "넷플릭스", "치맥", "배달앱", "침대", "저녁"],
-    "밤":   ["새벽", "불면증", "유튜브", "먹방", "폰", "내일걱정", "감성"],
-    "공통": [
-        "월요일", "금요일", "주말", "취준", "알바", "대학생", "직장인",
-        "번아웃", "MBTI", "덕질", "최애", "날씨", "비", "운동",
-        "다이어트", "연애", "솔로", "통장", "카페", "공부", "시험",
-        "인스타", "유튜브", "숏폼", "틱톡", "아이돌", "드라마",
-    ],
-}
+# ── 실시간 트렌드 스크래핑 ────────────────────────────────────────────────────
 
-# ── 트위터/커뮤 말투 템플릿 ───────────────────────────────────────────────────
-# {K} = 키워드1, {K2} = 키워드2
-
-TEMPLATES = [
-    # 급발진/뇌피셜형
-    "아니 {K} 얘기 좀 하자 진짜로",
-    "뇌피셜인데 {K} 때문에 이상해진 사람 나 혼자 아닐거임",
-    "잠깐 {K} 실화임? 나만 이럼?",
-    "아 {K} 진짜 왜이럼 ㅋㅋㅋㅋ 억울하지않음?",
-    "근데 {K} 하는 사람이랑 안 하는 사람이랑 차이가 있긴 함? 물어보는 거임 🦆",
-    "{K} 보고 현타왔으면 좋아요 한 번만",
-    "오꿈이도 {K} 때문에 꽥 됐음 진짜",
-    "아 잠깐 {K} 이거 어디서 많이 본 것 같은데",
-
-    # 상황극형
-    "나: {K} 해야지\n나(5분 후): 🦆\n나(한 시간 후): ㅋㅋ",
-    "{K} 전: 난 할 수 있어\n{K} 후: 꽥",
-    "내 하루 요약\n09:00 {K} 걱정\n12:00 {K} 더 걱정\n21:00 {K} 그냥 포기\n꽥",
-    "친구: {K} 어떻게 함?\n나: 모름\n친구: 진짜?\n나: 꽥",
-    "{K} 알림 뜨는 순간\n나: (멈춤)\n나: (아무것도 안 함)\n나: 꽥",
-    "직장인 {K} 타임라인\n아침: 오늘은 제대로 하자\n점심: 일단 밥\n저녁: 내일하자\n꽥",
-
-    # 목록/랭킹형
-    "{K} 레벨 테스트\nLv.1 그냥 봄\nLv.2 저장함\nLv.3 주변에 퍼뜨림\nLv.4 오꿈이 됨 🦆",
-    "{K} 대처법 3가지\n1. 모른척\n2. 더 모른척\n3. 오꿈이한테 꽥",
-    "{K} 유형 분류\nA형: 진짜 열심히 함\nB형: 열심히 하는 척\nC형: 오꿈이처럼 꽥만 함",
-    "{K} 고수 특징\n- 표정 없음\n- 말 없음\n- 그냥 함\n- 꽥",
-
-    # 드라마/현실 비교형
-    "드라마 속 {K}: 멋있음\n현실 {K}: 꽥",
-    "유튜브 {K} 영상: 30분\n실제 {K} 걸리는 시간: 3일\n오꿈이 소요시간: 꽥할 때까지",
-    "인스타 속 {K}: 감성\n실제: 꽥",
-    "{K} 잘하는 법 유튜브 봄 → 이해함 → 실천 안 함 → 꽥 → 다시 유튜브 봄",
-
-    # 공감 유발형 (구체적 상황)
-    "{K} 하다가 딴 생각하다가 다시 보면 30분 지나있는 거 나만임?",
-    "{K} 알림 끄고 나중에 보려다가 영원히 안 보는 사람 🦆",
-    "{K} 이야기 꺼내면 갑자기 전문가 되는 사람 꼭 있음 ㅋㅋㅋ",
-    "#{K} 검색했다가 2시간 후에 전혀 관련없는 거 보고 있는 나 🦆",
-    "{K} 시작할 때 '이번엔 진짜'라는 말 몇 번째인지 셀 수가 없음",
-    "{K} 잘하는 사람 보면서 나도 할 수 있겠다 → 5분 후 꽥",
-
-    # 오꿈이 캐릭터형 (오리 특성 활용)
-    "오리는 원래 {K} 안 함. 그냥 꽥함. 이게 맞는 삶인 것 같기도? 🦆",
-    "오꿈이 오늘의 결론: {K} 하든 안 하든 꽥은 함 🦆",
-    "오꿈이가 {K} 해봤는데 그냥 꽥이 나음 솔직히",
-    "어떤 오리가 그랬음. {K} 앞에서 꽥 하면 의외로 해결될 때 있다고. 그 오리 나임 🦆",
-    "{K} 검색하다가 오꿈이 계정 왔으면 그냥 쉬어 ㅋㅋ 🦆",
-
-    # 두 키워드 조합
-    "아니 {K}도 모자라서 {K2}까지? 오늘 꽥 두 번 각이다",
-    "{K} 하고 {K2} 까지 챙기는 사람들 인간임? 진짜로 묻는 거임 🦆",
-    "{K} 망했을 때 {K2} 하면 기분 나아진다는 거 뇌피셜인데 써봐",
-    "오늘의 대결: {K} vs {K2}\n승자: 침대\n꽥",
-
-    # 밈/인터넷 문화형
-    "{K} 고인물 vs 뉴비\n고인물: (말없이 함)\n뉴비: 어떻게 해요?\n오꿈이: 꽥",
-    "{K} 스킵 가능: ❌\n{K} 스킵하고 싶음: ✅\n🦆",
-    "모두가 {K} 얘기할 때 나만 모르는 그 기분 실화임ㅋㅋ 꽥",
-    "오늘 {K} 때문에 이미 하루 다 씀. 내일 할 거 없어짐. 꽥 🦆",
-
-    # 신박한 드립형
-    "{K} 앞에서 진지한 척 하다가 혼자 꽥 하고 웃은 사람 나 혼자만이길",
-    "과학적으로 {K} 보면 도파민 나온다고 함. (오꿈이 연구소 발표) 🦆",
-    "{K} 잘하는 비결? 오꿈이한테 물어봤는데 꽥 하고 가버림",
-    "오늘 {K} 관련해서 할 말이 많은데 꽥 밖에 안 나옴 🦆",
-    "{K}이 뭔지 아직도 모르는 사람 손? (오꿈이 손 🦆)",
-]
-
-
-def get_time_slot() -> str:
-    kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-    h = kst.hour
-    if 6 <= h < 10:  return "아침"
-    if 10 <= h < 14: return "점심"
-    if 14 <= h < 18: return "오후"
-    if 18 <= h < 22: return "저녁"
-    return "밤"
-
-
-def get_trends() -> list[str]:
+def get_naver_trends() -> list[str]:
+    """네이버 실시간 급상승 검색어 (DataLab JSON)"""
     try:
-        res = requests.get(
-            "https://signal.bz/news",
+        r = requests.get(
+            "https://datalab.naver.com/keyword/realtimeList.naver?where=main",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://www.naver.com",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=8,
+        )
+        data = r.json()
+        keywords = [item["keyword"] for item in data.get("ranks", [])]
+        if keywords:
+            return keywords[:10]
+    except Exception:
+        pass
+    return []
+
+
+def get_daum_trends() -> list[str]:
+    """다음 실시간 인기 검색어"""
+    try:
+        r = requests.get(
+            "https://search.daum.net/search?w=tot&DA=SBC&t__nil_searchbox=btn&sug=&sugo=&q=",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=8,
         )
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.content, "html.parser")
-            items = [el.get_text(strip=True) for el in soup.select(".trend_name")]
-            if items:
-                print(f"[트렌드] 실시간: {items[:10]}")
-                return items[:10]
-    except Exception as e:
-        print(f"[트렌드 스크래핑 실패] {e}")
-
-    slot = get_time_slot()
-    pool = TREND_POOL.get(slot, []) + TREND_POOL["공통"]
-    selected = random.sample(pool, min(10, len(pool)))
-    print(f"[트렌드] 키워드 풀 ({slot}): {selected}")
-    return selected
+        soup = BeautifulSoup(r.text, "html.parser")
+        items = soup.select(".rank_news .tit_item") or soup.select("a.link_issue")
+        keywords = [el.get_text(strip=True) for el in items if el.get_text(strip=True)]
+        if keywords:
+            return keywords[:10]
+    except Exception:
+        pass
+    return []
 
 
-def fill_template(template: str, keywords: list[str]) -> str:
-    kws = keywords[:]
-    random.shuffle(kws)
-    k1 = kws[0] if kws else "이것"
-    k2 = kws[1] if len(kws) > 1 else "저것"
-    return template.replace("{K}", k1).replace("{K2}", k2)
+def get_trends() -> list[str]:
+    """트렌드 소스 순차 시도 → 전부 실패 시 Gemini가 직접 판단"""
+    for fn in [get_naver_trends, get_daum_trends]:
+        result = fn()
+        if result:
+            print(f"[트렌드] {fn.__name__}: {result}")
+            return result
+    print("[트렌드] 스크래핑 실패 → Gemini가 현재 트렌드 추론")
+    return []  # 빈 리스트면 Gemini가 알아서
+
+
+# ── Gemini 트윗 생성 ─────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """너는 멘탈케어 앱 '오리의 꿈'의 마스코트 오꿈이 트위터 계정이야.
+
+불닭볶음면·올리브영·투썸플레이스 공식 트위터처럼, 브랜드인데 진짜 사람 같은 계정.
+오리 캐릭터지만 억지로 오리 드립 칠 필요 없고 자연스럽게.
+
+[문체 규칙]
+- 진짜 트위터 유저처럼 써. 커뮤 말투, 밈, 드립 다 ㄱㄱ
+- ㅋㅋㅋ ㅠㅠ ㄹㅇ ㅇㅈ ㅅㅂ 존나 아 씨 이런 거 자유롭게 써도 됨
+- "버텨" "힘내" "수고했어" "괜찮아" 이런 위로 말 절대 금지
+- 트렌드 키워드를 억지로 다 넣지 말고 진짜 말 되는 것만 자연스럽게
+- 말이 안 되는 조합 금지 (예: "비 레벨 테스트 Lv.1 그냥 봄" 이런 거 ㄴㄴ)
+- 진짜 공감되거나 웃긴 거. 애매하게 퉁치는 거 ㄴㄴ
+- 140자 이내
+
+[좋은 예시 스타일 참고]
+- "아 ㅋㅋㅋㅋ 월요일인데 이미 금요일 기분인 사람 나 혼자만이길"
+- "취준생 특) 오늘도 자소서 열었다가 유튜브 보다가 잠든 거 실화임?"
+- "치킨 시켜놓고 다이어트 생각하는 뇌구조가 진짜 오꿈이랑 똑같음 ㅋㅋ"
+- "아니 왜 비 오는 날은 더 자고 싶냐고 이게 무슨 현상임 진짜"
+- "회사에서 '잠깐 시간 있어요?' 들리는 순간 몸이 먼저 반응함 🦆"
+- "새벽에 유튜브 알고리즘한테 납치당한 사람 손 ✋"
+"""
 
 
 def generate_tweets(trends: list[str]) -> list[str]:
-    cleaned = [k.lstrip("#") for k in trends]
-    chosen = random.sample(TEMPLATES, min(10, len(TEMPLATES)))
-    return [fill_template(t, cleaned) for t in chosen]
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("GEMINI_API_KEY 환경 변수가 없음. aistudio.google.com에서 무료 발급")
 
+    client = genai.Client(api_key=api_key)
+
+    kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    weekday = weekdays[kst.weekday()]
+    time_str = kst.strftime(f"%Y년 %m월 %d일 {weekday} %H:%M")
+
+    if trends:
+        trend_context = f"지금 한국에서 실시간으로 핫한 키워드: {', '.join(trends)}\n이 중 자연스럽게 어울리는 것만 골라서 써."
+    else:
+        trend_context = "실시간 트렌드 데이터 없음. 지금 이 시간대에 한국 트위터에서 공감될 만한 주제로 자유롭게 써."
+
+    prompt = f"""{SYSTEM_PROMPT}
+
+현재 시각: {time_str}
+{trend_context}
+
+트윗 10개 생성해줘.
+- 번호, 따옴표, 불릿 없이 트윗 텍스트만
+- 각 트윗은 빈 줄로 구분
+- 다양한 주제/형식으로 (비슷한 패턴 반복 금지)
+- 제발 말 되게 써줘"""
+
+    response = client.models.generate_content(model="models/gemini-2.5-flash", contents=prompt)
+    raw = response.text.strip()
+
+    tweets = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # 번호 제거 (1. 2. 혹은 1) 등)
+        import re
+        line = re.sub(r"^\d+[\.\)]\s*", "", line)
+        if line:
+            tweets.append(line)
+
+    return tweets[:10]
+
+
+# ── Discord 전송 ──────────────────────────────────────────────────────────────
 
 def send_to_discord(tweets: list[str], trends: list[str]):
     kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     now_str = kst.strftime("%Y.%m.%d %H:%M KST")
-    trend_preview = " · ".join(trends[:6])
+    trend_str = " · ".join(trends[:6]) if trends else "Gemini 자체 추론"
 
     lines = [
         f"🦆 **오꿈이 트윗 초안** `{now_str}`",
-        f"📈 키워드: `{trend_preview}`",
+        f"📈 트렌드: `{trend_str}`",
         "─────────────────────────────────",
         "",
     ]
     for i, t in enumerate(tweets, 1):
         lines.append(f"**{i}.** {t}")
-    lines += ["", "─────────────────────────────────", "_마음에 드는 거 골라서 올려줘 ✏️_"]
+    lines += ["", "─────────────────────────────────", "_골라서 올려줘 ✏️_"]
 
     full_msg = "\n".join(lines)
     chunks, cur = [], ""
@@ -174,11 +169,11 @@ def send_to_discord(tweets: list[str], trends: list[str]):
 
     for chunk in chunks:
         r = requests.post(DISCORD_WEBHOOK_URL, json={"content": chunk}, timeout=10)
-        if r.status_code in (200, 204):
-            print(f"[Discord OK] {len(chunk)}자")
-        else:
-            print(f"[Discord 실패] {r.status_code}: {r.text}")
+        status = "OK" if r.status_code in (200, 204) else f"실패 {r.status_code}"
+        print(f"[Discord {status}] {len(chunk)}자")
 
+
+# ── 메인 ─────────────────────────────────────────────────────────────────────
 
 def main():
     kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
