@@ -1,162 +1,149 @@
 #!/usr/bin/env python3
 """
 오꿈이 트위터 콘텐츠 자동 생성기
-Gemini (무료) + 실시간 트렌드로 오꿈이 스타일 트윗 10개 생성 → Discord 전송
+Gemini Google Search grounding으로 실시간 트렌드 + 실제 트윗 말투 학습
 """
 
 import os
-import random
+import re
 import requests
 import datetime
 from google import genai
-from bs4 import BeautifulSoup
+from google.genai import types
 
 DISCORD_WEBHOOK_URL = (
     "https://discord.com/api/webhooks/1494971650847014913/"
     "QEfp8_ssBU4MJfQa-SWTV-ko9AtdPk3Psjpmn5Jz_FXhIz7cdb2Nopg5O5phoHQ1A6RQ"
 )
+MODEL = "models/gemini-2.5-flash"
 
-# ── 실시간 트렌드 스크래핑 ────────────────────────────────────────────────────
-
-def get_naver_trends() -> list[str]:
-    """네이버 실시간 급상승 검색어 (DataLab JSON)"""
-    try:
-        r = requests.get(
-            "https://datalab.naver.com/keyword/realtimeList.naver?where=main",
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://www.naver.com",
-                "X-Requested-With": "XMLHttpRequest",
-            },
-            timeout=8,
-        )
-        data = r.json()
-        keywords = [item["keyword"] for item in data.get("ranks", [])]
-        if keywords:
-            return keywords[:10]
-    except Exception:
-        pass
-    return []
-
-
-def get_daum_trends() -> list[str]:
-    """다음 실시간 인기 검색어"""
-    try:
-        r = requests.get(
-            "https://search.daum.net/search?w=tot&DA=SBC&t__nil_searchbox=btn&sug=&sugo=&q=",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=8,
-        )
-        soup = BeautifulSoup(r.text, "html.parser")
-        items = soup.select(".rank_news .tit_item") or soup.select("a.link_issue")
-        keywords = [el.get_text(strip=True) for el in items if el.get_text(strip=True)]
-        if keywords:
-            return keywords[:10]
-    except Exception:
-        pass
-    return []
-
-
-def get_trends() -> list[str]:
-    """트렌드 소스 순차 시도 → 전부 실패 시 Gemini가 직접 판단"""
-    for fn in [get_naver_trends, get_daum_trends]:
-        result = fn()
-        if result:
-            print(f"[트렌드] {fn.__name__}: {result}")
-            return result
-    print("[트렌드] 스크래핑 실패 → Gemini가 현재 트렌드 추론")
-    return []  # 빈 리스트면 Gemini가 알아서
-
-
-# ── Gemini 트윗 생성 ─────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """너는 트위터 계정 오꿈이야. 오리의 꿈 앱 마스코트인데 그냥 트위터 폐인임.
-디시인사이드 눈팅 10년차, 트위터 중독자, 밈 고인물.
-
-[절대 하지 마]
-- "후회는 내일의 나에게!" 이런 거 ㄴㄴ 개구려
-- "~인 듯 ㅜㅜ" "~네요" "~습니다" ㄴㄴ
-- 위로, 힐링, 응원 ㄴㄴ 아무도 안 물어봄
-- 말 길게 늘이기 ㄴㄴ. 짧고 세게
-- 이모지 남발 ㄴㄴ. 🦆 가끔만
-- 브랜드 계정 티 내기 ㄴㄴ
-
-[말투]
-- 디시/트위터 고인물처럼: ㅋㅋ ㄹㅇ ㅇㅈ 존나 개- 씨 아 진짜 등 자연스럽게
-- 문장 짧게 끊기. 호흡 빠르게
-- 공감은 구체적으로. 추상적인 공감 ㄴㄴ
-- 드립은 예상 못 한 방향으로
-- 말이 되는 거 써. 억지 조합 ㄴㄴ
-
-[참고할 실제 트윗 문체]
-"치킨 먹으면서 오늘부터 다이어트 해야지 하는 뇌 구조가 궁금함"
-"알람 5개 맞춰놓고 다 끄는 사람이랑 알람 1개로 일어나는 사람은 다른 종족임"
-"아니 진짜 왜 누우면 갑자기 3년 전 일이 생각나냐 이게 무슨 고문이야"
-"회의 중에 갑자기 딴 생각하다가 이름 불리는 순간 심장 쿵 내려앉은 사람"
-"편의점 도시락 고르는 데 15분 쓰는 거 나만임?"
-"오늘 존나 힘들었는데 집 오는 길에 고양이 봤더니 기분 나아짐. 고양이한테 지배당하는 중"
-"야 근데 진짜로 주말이 왜 이렇게 빨리 가냐 평일은 왜 이렇게 느리냐 시간이 나 싫어하냐"
-"모르는 번호 전화 와서 안 받았더니 문자도 없음. 뭐야 나한테 왜 전화함"
-"""
-
-
-def generate_tweets(trends: list[str]) -> list[str]:
+def get_client():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise EnvironmentError("GEMINI_API_KEY 환경 변수가 없음. aistudio.google.com에서 무료 발급")
+        raise EnvironmentError("GEMINI_API_KEY 없음")
+    return genai.Client(api_key=api_key)
 
-    client = genai.Client(api_key=api_key)
+def grounded(client, prompt: str) -> str:
+    """Google Search grounding으로 실시간 웹 정보 포함해서 생성"""
+    r = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        ),
+    )
+    return r.text.strip()
 
+def generate_only(client, prompt: str) -> str:
+    """검색 없이 순수 생성만"""
+    r = client.models.generate_content(model=MODEL, contents=prompt)
+    return r.text.strip()
+
+# ── Step 1: 실시간 트렌드 가져오기 ──────────────────────────────────────────
+
+def get_trends(client) -> list[str]:
+    kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+    time_str = kst.strftime("%Y년 %m월 %d일 %H:%M")
+
+    raw = grounded(
+        client,
+        f"오늘({time_str}) 한국 트위터 X 실시간 트렌드 검색해서 상위 키워드 10개만 알려줘. "
+        "각 줄에 키워드 하나. 번호나 설명 없이 키워드만. "
+        "예: 오드투러브\n크리스탈\n뮤뱅 1위"
+    )
+    print(f"[트렌드 raw]\n{raw}\n")
+
+    trends = []
+    for line in raw.split("\n"):
+        line = line.strip()
+        line = re.sub(r"^\d+[\.\)\-\*]\s*", "", line)
+        line = line.lstrip("#").strip()
+        line = re.sub(r"\*+", "", line).strip()
+        if line and 1 < len(line) < 40 and not line.startswith("현재") and not line.startswith("지금"):
+            trends.append(line)
+
+    print(f"[트렌드] {trends[:10]}")
+    return trends[:10]
+
+# ── Step 2: 트렌드 관련 실제 트윗 샘플 수집 ─────────────────────────────────
+
+def get_tweet_samples(client, trends: list[str]) -> str:
+    top = trends[:3]
+    raw = grounded(
+        client,
+        f"트위터(X)에서 {', '.join(top)} 관련해서 실제로 올라온 한국어 트윗 10개 찾아줘. "
+        "재밌거나 공감되거나 드립 있는 트윗 위주로. "
+        "트윗 본문만 줄바꿈으로. 말투와 이모지 그대로 유지해. "
+        "혐오·욕설·공격적인 내용은 제외. 번호나 인용부호 없이 텍스트만."
+    )
+    print(f"[트윗 샘플 수집 완료] {len(raw)}자")
+    return raw
+
+# ── Step 3: 오꿈이 트윗 생성 ─────────────────────────────────────────────────
+
+PERSONA = """너는 트위터 계정 오꿈이야. 오리의 꿈 앱 마스코트인데 트위터/디시 고인물 느낌.
+
+절대 금지:
+- 위로, 힐링, "수고했어" "힘내" 이런 거
+- "~인 듯 ㅜㅜ" "~해요" 공손한 말투
+- 혐오·욕설·누군가 공격하는 내용
+- 죽음·자해 관련 표현 (농담이어도 ㄴㄴ, 멘탈케어 앱임)
+- 억지 오리 드립
+- 길게 늘이기
+
+말투: 진짜 트위터 유저처럼. ㅋㅋ ㄹㅇ ㅇㅈ ㅅㅂ 아 씨 개- 자연스럽게.
+짧고 직관적. 공감은 아주 구체적인 상황으로. 드립은 예상 못한 방향.
+특정인·집단 비난 ㄴㄴ. 일상/상황 공감 위주.
+"""
+
+def generate_tweets(client, trends: list[str], samples: str) -> list[str]:
     kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
-    weekday = weekdays[kst.weekday()]
-    time_str = kst.strftime(f"%Y년 %m월 %d일 {weekday} %H:%M")
+    time_str = kst.strftime(f"%H:%M {weekdays[kst.weekday()]}")
 
-    if trends:
-        trend_context = f"지금 한국에서 실시간으로 핫한 키워드: {', '.join(trends)}\n이 중 자연스럽게 어울리는 것만 골라서 써."
-    else:
-        trend_context = "실시간 트렌드 데이터 없음. 지금 이 시간대에 한국 트위터에서 공감될 만한 주제로 자유롭게 써."
+    prompt = f"""{PERSONA}
 
-    prompt = f"""{SYSTEM_PROMPT}
+지금 시각: {time_str}
+실시간 트위터 트렌드: {', '.join(trends)}
 
-현재 시각: {time_str}
-{trend_context}
+실제 트위터에서 수집한 트윗 샘플 (말투 참고용):
+---
+{samples}
+---
 
-트윗 10개 써줘.
+위 실제 트윗들의 말투, 호흡, 문체를 학습해서 오꿈이 스타일로 트윗 10개 써줘.
+트렌드 중 자연스럽게 녹일 수 있는 것만 써. 억지 언급 ㄴㄴ.
+
 규칙:
-- 텍스트만. 번호 따옴표 없이
+- 트윗 텍스트만. 번호 따옴표 불릿 없이
 - 빈 줄로 구분
 - 10개 다 다른 주제/형식
-- 말 되게. 억지 없이
-- 짧고 세게. 한 문장~두 문장"""
+- 짧고 세게. 한~두 문장
+- 말 되게"""
 
-    response = client.models.generate_content(model="models/gemini-2.5-flash", contents=prompt)
-    raw = response.text.strip()
+    raw = generate_only(client, prompt)
 
     tweets = []
     for line in raw.split("\n"):
         line = line.strip()
         if not line:
             continue
-        # 번호 제거 (1. 2. 혹은 1) 등)
-        import re
         line = re.sub(r"^\d+[\.\)]\s*", "", line)
         if line:
             tweets.append(line)
 
     return tweets[:10]
 
-
 # ── Discord 전송 ──────────────────────────────────────────────────────────────
 
 def send_to_discord(tweets: list[str], trends: list[str]):
     kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
     now_str = kst.strftime("%Y.%m.%d %H:%M KST")
-    trend_str = " · ".join(trends[:6]) if trends else "Gemini 자체 추론"
+    trend_str = " · ".join(trends[:6])
 
     lines = [
         f"🦆 **오꿈이 트윗 초안** `{now_str}`",
-        f"📈 트렌드: `{trend_str}`",
+        f"📈 실시간 트렌드: `{trend_str}`",
         "─────────────────────────────────",
         "",
     ]
@@ -180,7 +167,6 @@ def send_to_discord(tweets: list[str], trends: list[str]):
         status = "OK" if r.status_code in (200, 204) else f"실패 {r.status_code}"
         print(f"[Discord {status}] {len(chunk)}자")
 
-
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -189,16 +175,23 @@ def main():
     print(f"오꿈이 트윗 생성: {kst.strftime('%Y-%m-%d %H:%M KST')}")
     print(f"{'='*50}")
 
-    trends = get_trends()
-    tweets = generate_tweets(trends)
+    client = get_client()
 
-    print(f"\n[생성된 트윗 {len(tweets)}개]")
+    print("[1] 실시간 트렌드 수집 중...")
+    trends = get_trends(client)
+
+    print("[2] 실제 트윗 샘플 수집 중...")
+    samples = get_tweet_samples(client, trends)
+
+    print("[3] 오꿈이 트윗 생성 중...")
+    tweets = generate_tweets(client, trends, samples)
+
+    print(f"\n[결과 {len(tweets)}개]")
     for i, t in enumerate(tweets, 1):
         print(f"  {i}. {t}")
 
     send_to_discord(tweets, trends)
     print("\n완료!\n")
-
 
 if __name__ == "__main__":
     main()
