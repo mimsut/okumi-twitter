@@ -23,21 +23,39 @@ def get_client():
         raise EnvironmentError("GEMINI_API_KEY 없음")
     return genai.Client(api_key=api_key)
 
+def _extract_text(response) -> str:
+    """응답에서 텍스트 안전하게 추출 (None 방어)"""
+    if response.text:
+        return response.text.strip()
+    # candidates에서 직접 추출 시도
+    try:
+        for candidate in response.candidates:
+            for part in candidate.content.parts:
+                if hasattr(part, "text") and part.text:
+                    return part.text.strip()
+    except Exception:
+        pass
+    return ""
+
 def grounded(client, prompt: str) -> str:
     """Google Search grounding으로 실시간 웹 정보 포함해서 생성"""
-    r = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
-        ),
-    )
-    return r.text.strip()
+    try:
+        r = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            ),
+        )
+        return _extract_text(r)
+    except Exception as e:
+        print(f"[grounded 실패] {e}")
+        return ""
 
 def generate_only(client, prompt: str) -> str:
     """검색 없이 순수 생성만"""
     r = client.models.generate_content(model=MODEL, contents=prompt)
-    return r.text.strip()
+    return _extract_text(r)
 
 # ── Step 1: 실시간 트렌드 가져오기 ──────────────────────────────────────────
 
@@ -178,10 +196,18 @@ def main():
     client = get_client()
 
     print("[1] 실시간 트렌드 수집 중...")
-    trends = get_trends(client)
+    try:
+        trends = get_trends(client)
+    except Exception as e:
+        print(f"[트렌드 실패] {e} → 빈 목록으로 진행")
+        trends = []
 
     print("[2] 실제 트윗 샘플 수집 중...")
-    samples = get_tweet_samples(client, trends)
+    try:
+        samples = get_tweet_samples(client, trends)
+    except Exception as e:
+        print(f"[샘플 수집 실패] {e} → 샘플 없이 진행")
+        samples = ""
 
     print("[3] 오꿈이 트윗 생성 중...")
     tweets = generate_tweets(client, trends, samples)
