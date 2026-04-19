@@ -17,7 +17,7 @@ jobs:
           python-version: '3.12'
 
       - name: 패키지 설치
-        run: pip install requests beautifulsoup4 google-generativeai
+        run: pip install requests beautifulsoup4 google-genai
 
       - name: 오꿈이 트윗 생성 & Discord 전송
         env:
